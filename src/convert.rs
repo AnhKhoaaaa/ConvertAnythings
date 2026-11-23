@@ -12,6 +12,8 @@ use windows::core::PCWSTR;
 use crate::wide;
 
 mod image;
+mod pdf;
+mod word;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -22,6 +24,9 @@ pub enum Format {
     Bmp,
     Tiff,
     Webp,
+    Pdf,
+    Txt,
+    Docx,
 }
 
 impl Format {
@@ -32,6 +37,9 @@ impl Format {
             "bmp" => Some(Self::Bmp),
             "tif" | "tiff" => Some(Self::Tiff),
             "webp" => Some(Self::Webp),
+            "pdf" => Some(Self::Pdf),
+            "txt" => Some(Self::Txt),
+            "docx" => Some(Self::Docx),
             _ => None,
         }
     }
@@ -43,6 +51,9 @@ impl Format {
             Self::Bmp => "bmp",
             Self::Tiff => "tiff",
             Self::Webp => "webp",
+            Self::Pdf => "pdf",
+            Self::Txt => "txt",
+            Self::Docx => "docx",
         }
     }
 
@@ -53,6 +64,9 @@ impl Format {
             Self::Bmp => "BMP",
             Self::Tiff => "TIFF",
             Self::Webp => "WebP",
+            Self::Pdf => "PDF",
+            Self::Txt => "TXT",
+            Self::Docx => "DOCX",
         }
     }
 }
@@ -60,12 +74,14 @@ impl Format {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
     Image,
+    Document,
 }
 
 impl Group {
     pub fn label(self) -> &'static str {
         match self {
             Self::Image => "Ảnh",
+            Self::Document => "Tài liệu",
         }
     }
 }
@@ -87,6 +103,7 @@ const IMAGES: &[Format] = &[
 #[derive(Default)]
 pub struct Engines {
     ffmpeg: Option<PathBuf>,
+    word: bool,
 }
 
 impl Engines {
@@ -97,13 +114,44 @@ impl Engines {
                 .map(|directory| directory.join("ffmpeg.exe"))
                 .find(|executable| executable.is_file())
         });
-        Self { ffmpeg }
+        Self {
+            ffmpeg,
+            word: word::available(),
+        }
     }
 
     pub fn choices(&self, path: &Path) -> (Vec<Choice>, Option<&'static str>) {
         let Some(input) = path.extension().and_then(Format::parse) else {
             return (Vec::new(), Some("Định dạng chưa hỗ trợ"));
         };
+        if input == Format::Pdf {
+            return (
+                vec![
+                    Choice {
+                        group: Group::Image,
+                        format: Format::Jpg,
+                    },
+                    Choice {
+                        group: Group::Image,
+                        format: Format::Png,
+                    },
+                ],
+                None,
+            );
+        }
+        if matches!(input, Format::Txt | Format::Docx) {
+            return if self.word {
+                (
+                    vec![Choice {
+                        group: Group::Document,
+                        format: Format::Pdf,
+                    }],
+                    None,
+                )
+            } else {
+                (Vec::new(), Some("Cần Word Desktop"))
+            };
+        }
         if input == Format::Webp && self.ffmpeg.is_none() {
             return (Vec::new(), Some("WebP cần FFmpeg"));
         }
@@ -160,7 +208,17 @@ pub fn run(input: &Path, format: Format) -> Result<PathBuf> {
     let stem = input.file_stem().ok_or("Không đọc được tên tệp gốc.")?;
     let stage = Staging::new(parent)?;
     let temporary = stage.0.join(format!("result.{}", format.extension()));
-    image::convert(&engines, source, &input, format, &temporary, &stage.0)?;
+    match source {
+        Format::Pdf => {
+            if pdf::convert(&input, format, &temporary, &stage.0, stem)? {
+                let mut folder_name = stem.to_os_string();
+                folder_name.push("-pages");
+                return publish(&stage.0.join("pages"), parent, &folder_name, None);
+            }
+        }
+        Format::Txt | Format::Docx => word::convert(&input, source, &temporary, &stage.0)?,
+        _ => image::convert(&engines, source, &input, format, &temporary, &stage.0)?,
+    }
     publish(&temporary, parent, stem, Some(format.extension()))
 }
 

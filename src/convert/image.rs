@@ -63,6 +63,15 @@ fn validate_webp(path: &Path) -> Result<()> {
 }
 
 fn encode(input: &Path, output: Format, destination: &Path) -> Result<()> {
+    encode_with_size(input, output, destination, None)
+}
+
+pub fn encode_with_size(
+    input: &Path,
+    output: Format,
+    destination: &Path,
+    dimensions: Option<(u32, u32, f64)>,
+) -> Result<()> {
     fn wic_error(error: windows::core::Error) -> String {
         format!("Windows Imaging Component không thể chuyển ảnh. {error}")
     }
@@ -92,6 +101,28 @@ fn encode(input: &Path, output: Format, destination: &Path) -> Result<()> {
         source.GetSize(&mut width, &mut height).map_err(wic_error)?;
         let (mut dpi_x, mut dpi_y) = (96.0, 96.0);
         let _ = source.GetResolution(&mut dpi_x, &mut dpi_y);
+        let source = if let Some((requested_width, requested_height, resolution)) = dimensions {
+            dpi_x = resolution;
+            dpi_y = resolution;
+            if (width, height) == (requested_width, requested_height) {
+                source
+            } else {
+                let scaler = factory.CreateBitmapScaler().map_err(wic_error)?;
+                scaler
+                    .Initialize(
+                        &source,
+                        requested_width,
+                        requested_height,
+                        WICBitmapInterpolationModeFant,
+                    )
+                    .map_err(wic_error)?;
+                width = requested_width;
+                height = requested_height;
+                scaler.cast().map_err(wic_error)?
+            }
+        } else {
+            source
+        };
         let (container, mut pixel_format, flatten) = match output {
             Format::Jpg => (GUID_ContainerFormatJpeg, GUID_WICPixelFormat24bppBGR, true),
             Format::Bmp => (GUID_ContainerFormatBmp, GUID_WICPixelFormat24bppBGR, true),
