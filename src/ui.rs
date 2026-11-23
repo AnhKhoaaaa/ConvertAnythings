@@ -175,7 +175,7 @@ fn set_drop_effect(effect: *mut DROPEFFECT, accept: bool) -> bool {
 
 fn file_from_drop(data: &IDataObject) -> Option<PathBuf> {
     let format = FORMATETC {
-        cfFormat: CF_HDROP.0 as u16,
+        cfFormat: CF_HDROP.0,
         ptd: std::ptr::null_mut(),
         dwAspect: DVASPECT_CONTENT.0,
         lindex: -1,
@@ -288,30 +288,37 @@ impl App {
                 ..Default::default()
             };
             GetMonitorInfoW(monitor, &mut info).ok()?;
-            let (mut dpi, mut dpi_y) = (96, 96);
-            let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y);
-            let bounds = info.rcWork;
-            let size = ((280 * dpi / 96) as i32)
-                .min((bounds.right - bounds.left).min(bounds.bottom - bounds.top));
-            let x = (pointer.x - size / 2).clamp(bounds.left, bounds.right - size);
-            let y = (pointer.y - size / 2).clamp(bounds.top, bounds.bottom - size);
-            let bounds = Bounds { x, y, size };
-            let renderer = Renderer::new(bounds)?;
-
             let window = CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_LAYERED,
                 OVERLAY_CLASS,
                 APP_NAME,
                 WS_POPUP,
-                x,
-                y,
-                size,
-                size,
+                pointer.x,
+                pointer.y,
+                1,
+                1,
                 None,
                 None,
                 Some(self.module),
                 None,
             )?;
+            let dpi = match GetDpiForWindow(window) {
+                0 => 96,
+                value => value,
+            };
+            let work = info.rcWork;
+            let size =
+                ((280 * dpi / 96) as i32).min((work.right - work.left).min(work.bottom - work.top));
+            let x = (pointer.x - size / 2).clamp(work.left, work.right - size);
+            let y = (pointer.y - size / 2).clamp(work.top, work.bottom - size);
+            let bounds = Bounds { x, y, size };
+            let renderer = match Renderer::new(bounds) {
+                Ok(renderer) => renderer,
+                Err(error) => {
+                    let _ = DestroyWindow(window);
+                    return Err(error);
+                }
+            };
             let drag = Rc::new(RefCell::new(Drag::default()));
             let target: IDropTarget = FileDrop {
                 host: self.host,

@@ -140,8 +140,7 @@ impl Renderer {
                 menu.title(),
                 &self.center_text,
                 brush,
-                radius,
-                radius,
+                center.point,
                 radius * 0.32,
                 0xdaf0ee,
             );
@@ -157,8 +156,7 @@ impl Renderer {
                     slice.label(),
                     &self.label,
                     brush,
-                    label.X,
-                    label.Y,
+                    label,
                     radius * 0.38,
                     if selected { 0x102b2b } else { 0xe3f5f3 },
                 );
@@ -172,17 +170,16 @@ impl Renderer {
         text: &str,
         style: &IDWriteTextFormat,
         brush: &ID2D1SolidColorBrush,
-        x: f32,
-        y: f32,
+        center: Vector2,
         half_width: f32,
         color: u32,
     ) {
         let text: Vec<u16> = text.encode_utf16().collect();
         let rect = D2D_RECT_F {
-            left: x - half_width,
-            top: y - 24.0,
-            right: x + half_width,
-            bottom: y + 24.0,
+            left: center.X - half_width,
+            top: center.Y - 24.0,
+            right: center.X + half_width,
+            bottom: center.Y + 24.0,
         };
         unsafe {
             brush.SetColor(&rgb(color, 1.0));

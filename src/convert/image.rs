@@ -209,7 +209,7 @@ fn flatten_white(
         converter
             .CopyPixels(std::ptr::null(), stride, &mut pixels)
             .map_err(|error| error.to_string())?;
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             let alpha = u16::from(pixel[3]);
             for color in &mut pixel[..3] {
                 *color = ((u16::from(*color) * alpha + 255 * (255 - alpha) + 127) / 255) as u8;

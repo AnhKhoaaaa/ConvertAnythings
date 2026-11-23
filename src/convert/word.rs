@@ -83,9 +83,10 @@ fn normalize_text(input: &Path, output: &Path) -> Result<()> {
             }
             let little_endian = bytes[0] == 0xff;
             let units: Vec<_> = rest
-                .chunks_exact(2)
-                .map(|pair| {
-                    let unit = [pair[0], pair[1]];
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&unit| {
                     if little_endian {
                         u16::from_le_bytes(unit)
                     } else {
