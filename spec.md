@@ -34,3 +34,4 @@
 ## Nhật ký triển khai và khác biệt trên Windows
 
 - Đã xác nhận bản Release nhận được `CF_HDROP` từ Explorer thật khi bấm F8 sau khi đã bắt đầu kéo một BMP. Sau khi di chuyển con trỏ vào cửa sổ mới, Explorer gọi `DragEnter`, rồi `Drop` khi nhả chuột. Tệp gốc vẫn nằm ở vị trí cũ. Đây là hai sự kiện riêng, vì phím tắt không mang đường dẫn và cửa sổ phải trở thành đích của lượt kéo.
+- Menu Direct2D đã được kiểm tra bằng ảnh chụp từ phiên Windows và bằng thao tác chọn ô JPG trong Explorer. Bộ kiểm thử ảnh xác nhận các container JPG/PNG/BMP/TIFF/WebP, nền trắng cho JPG, giữ alpha khi chuyển qua TIFF/WebP, tên Unicode, trùng tên và dọn kết quả tạm khi lỗi.

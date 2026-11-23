@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod convert;
+mod menu;
+mod render;
 mod ui;
 
 use std::{ffi::OsStr, fs::OpenOptions, io::Write, os::windows::ffi::OsStrExt};
@@ -17,6 +20,30 @@ fn trace(message: impl AsRef<str>) {
 }
 
 fn main() -> std::process::ExitCode {
+    let mut args = std::env::args_os().skip(1);
+    if let Some(command) = args.next() {
+        let result = if command == "--convert" && args.next().as_deref() == Some(OsStr::new("--to"))
+        {
+            match (args.next(), args.next(), args.next()) {
+                (Some(format), Some(input), None) => convert::Format::parse(&format)
+                    .ok_or_else(|| "Định dạng đầu ra không được hỗ trợ.".to_owned())
+                    .and_then(|format| convert::run(std::path::Path::new(&input), format)),
+                _ => Err("Cú pháp: --convert --to <format> <path>".to_owned()),
+            }
+        } else {
+            Err("Cú pháp: --convert --to <format> <path>".to_owned())
+        };
+        return match result {
+            Ok(path) => {
+                println!("{}", path.display());
+                std::process::ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     match ui::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
