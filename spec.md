@@ -30,3 +30,7 @@
 ## Tham khảo Klick
 
 [Klick](https://github.com/imggion/klick) mô tả hai cách kích hoạt trên macOS. Lượt giữ Shift có thể đọc mục đang chọn trong Finder qua Apple Events, còn chế độ kéo nhận tệp khi người dùng thả lên menu. V1 Windows tập trung vào chế độ kéo thả bằng OLE và dùng F8 mặc định. Tham khảo cách trình bày danh sách tác vụ theo loại tệp và cách ghi kết quả cạnh tệp gốc. Giao diện Windows được vẽ riêng.
+
+## Nhật ký triển khai và khác biệt trên Windows
+
+- Đã xác nhận bản Release nhận được `CF_HDROP` từ Explorer thật khi bấm F8 sau khi đã bắt đầu kéo một BMP. Sau khi di chuyển con trỏ vào cửa sổ mới, Explorer gọi `DragEnter`, rồi `Drop` khi nhả chuột. Tệp gốc vẫn nằm ở vị trí cũ. Đây là hai sự kiện riêng, vì phím tắt không mang đường dẫn và cửa sổ phải trở thành đích của lượt kéo.
