@@ -12,6 +12,7 @@ use windows::core::PCWSTR;
 use crate::wide;
 
 mod image;
+mod media;
 mod pdf;
 mod word;
 
@@ -27,6 +28,15 @@ pub enum Format {
     Pdf,
     Txt,
     Docx,
+    Mp4,
+    Mov,
+    Mkv,
+    Webm,
+    Mp3,
+    Wav,
+    Flac,
+    M4a,
+    Ogg,
 }
 
 impl Format {
@@ -40,6 +50,15 @@ impl Format {
             "pdf" => Some(Self::Pdf),
             "txt" => Some(Self::Txt),
             "docx" => Some(Self::Docx),
+            "mp4" => Some(Self::Mp4),
+            "mov" => Some(Self::Mov),
+            "mkv" => Some(Self::Mkv),
+            "webm" => Some(Self::Webm),
+            "mp3" => Some(Self::Mp3),
+            "wav" => Some(Self::Wav),
+            "flac" => Some(Self::Flac),
+            "m4a" => Some(Self::M4a),
+            "ogg" => Some(Self::Ogg),
             _ => None,
         }
     }
@@ -54,6 +73,15 @@ impl Format {
             Self::Pdf => "pdf",
             Self::Txt => "txt",
             Self::Docx => "docx",
+            Self::Mp4 => "mp4",
+            Self::Mov => "mov",
+            Self::Mkv => "mkv",
+            Self::Webm => "webm",
+            Self::Mp3 => "mp3",
+            Self::Wav => "wav",
+            Self::Flac => "flac",
+            Self::M4a => "m4a",
+            Self::Ogg => "ogg",
         }
     }
 
@@ -67,7 +95,27 @@ impl Format {
             Self::Pdf => "PDF",
             Self::Txt => "TXT",
             Self::Docx => "DOCX",
+            Self::Mp4 => "MP4",
+            Self::Mov => "MOV",
+            Self::Mkv => "MKV",
+            Self::Webm => "WebM",
+            Self::Mp3 => "MP3",
+            Self::Wav => "WAV",
+            Self::Flac => "FLAC",
+            Self::M4a => "M4A",
+            Self::Ogg => "OGG",
         }
+    }
+
+    fn is_video(self) -> bool {
+        matches!(self, Self::Mp4 | Self::Mov | Self::Mkv | Self::Webm)
+    }
+
+    fn is_audio(self) -> bool {
+        matches!(
+            self,
+            Self::Mp3 | Self::Wav | Self::Flac | Self::M4a | Self::Ogg
+        )
     }
 }
 
@@ -75,6 +123,8 @@ impl Format {
 pub enum Group {
     Image,
     Document,
+    Video,
+    Audio,
 }
 
 impl Group {
@@ -82,6 +132,8 @@ impl Group {
         match self {
             Self::Image => "Ảnh",
             Self::Document => "Tài liệu",
+            Self::Video => "Video",
+            Self::Audio => "Âm thanh",
         }
     }
 }
@@ -152,6 +204,12 @@ impl Engines {
                 (Vec::new(), Some("Cần Word Desktop"))
             };
         }
+        if input.is_video() || input.is_audio() {
+            if self.ffmpeg.is_none() {
+                return (Vec::new(), Some("Cần FFmpeg"));
+            }
+            return (media::choices(input), None);
+        }
         if input == Format::Webp && self.ffmpeg.is_none() {
             return (Vec::new(), Some("WebP cần FFmpeg"));
         }
@@ -217,6 +275,9 @@ pub fn run(input: &Path, format: Format) -> Result<PathBuf> {
             }
         }
         Format::Txt | Format::Docx => word::convert(&input, source, &temporary, &stage.0)?,
+        format_source if format_source.is_audio() || format_source.is_video() => {
+            media::convert(&engines, &input, format, &temporary)?;
+        }
         _ => image::convert(&engines, source, &input, format, &temporary, &stage.0)?,
     }
     publish(&temporary, parent, stem, Some(format.extension()))

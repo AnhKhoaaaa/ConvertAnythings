@@ -126,6 +126,9 @@ impl Menu {
 
 fn ring(items: impl Iterator<Item = Item>, inner: f32, outer: f32) -> Vec<Slice> {
     let items: Vec<_> = items.collect();
+    if items.is_empty() {
+        return Vec::new();
+    }
     let step = TAU / items.len() as f32;
     items
         .into_iter()
@@ -170,5 +173,35 @@ mod tests {
             menu.point(x, y);
             assert_eq!(menu.output(), output);
         }
+    }
+
+    #[test]
+    fn moving_from_a_group_to_the_outer_ring_selects_an_output() {
+        let mut menu = Menu::default();
+        menu.set_choices(
+            vec![
+                Choice {
+                    group: Group::Video,
+                    format: Format::Webm,
+                },
+                Choice {
+                    group: Group::Audio,
+                    format: Format::Mp3,
+                },
+            ],
+            None,
+        );
+        menu.point(0.0, -0.50);
+        assert_eq!(menu.output(), None);
+        assert_eq!(menu.title(), "Video");
+        menu.point(0.0, -0.75);
+        assert_eq!(menu.output(), Some(Format::Webm));
+        menu.point(0.0, 0.50);
+        assert_eq!(menu.title(), "Âm thanh");
+        menu.point(0.0, -0.75);
+        assert_eq!(menu.output(), Some(Format::Mp3));
+        menu.point(0.0, 0.0);
+        assert_eq!(menu.output(), None);
+        assert_eq!(menu.title(), "Chuyển đổi");
     }
 }

@@ -1,7 +1,8 @@
 param(
     [string]$Executable = 'target\release\convert-anythings.exe',
     [switch]$ImagesOnly,
-    [switch]$DocumentsOnly
+    [switch]$DocumentsOnly,
+    [switch]$MediaOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -93,7 +94,7 @@ function New-DocxFixture([string]$Path) {
 }
 
 $vietnamese = 'Ti' + [char]0x1ebf + 'ng Vi' + [char]0x1ec7 + 't'
-if (-not $DocumentsOnly) {
+if (-not $DocumentsOnly -and -not $MediaOnly) {
 $png = Join-Path $case "$vietnamese [mau].png"
 $image = New-Object Drawing.Bitmap 52, 36, ([Drawing.Imaging.PixelFormat]::Format32bppArgb)
 try {
@@ -136,6 +137,7 @@ Write-Output "Image conversion smoke passed. Fixtures: $case"
 
 if ($ImagesOnly) { return }
 
+if (-not $MediaOnly) {
 $single = Join-Path $case 'one-page.pdf'
 New-PdfFixture $single 1
 $raster = Convert-File $single png
@@ -207,3 +209,61 @@ try {
 }
 Assert (@(Get-ChildItem -LiteralPath $case -Force -Filter '.convert-anythings-*').Count -eq 0) 'Document conversion left staging files behind.'
 Write-Output "Word PDF tests passed. Fixtures: $case"
+}
+
+if ($DocumentsOnly) { return }
+
+$ffmpeg = (Get-Command ffmpeg -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+$ffprobe = (Get-Command ffprobe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+
+function Write-MediaFixture([string[]]$Options) {
+    & $ffmpeg -hide_banner -nostdin -loglevel error @Options
+    Assert ($LASTEXITCODE -eq 0) 'FFmpeg could not generate a test fixture.'
+}
+
+function Assert-Codecs([string]$Path, [string]$Video, [string]$Audio) {
+    $json = & $ffprobe -v error -show_entries stream=codec_name,codec_type -of json $Path
+    Assert ($LASTEXITCODE -eq 0) "ffprobe could not open $Path"
+    $stream = ($json | Out-String | ConvertFrom-Json).streams
+    $actualVideo = ($stream | Where-Object codec_type -eq 'video' | ForEach-Object { $_.codec_name }) -join ','
+    $actualAudio = ($stream | Where-Object codec_type -eq 'audio' | ForEach-Object { $_.codec_name }) -join ','
+    Assert ($actualVideo -eq $Video -and $actualAudio -eq $Audio) "Wrong codecs in $Path. Video=$actualVideo, audio=$actualAudio"
+}
+
+$mp4 = Join-Path $case 'sample-video.mp4'
+$mov = Join-Path $case 'video-without-audio.mov'
+$mkv = Join-Path $case 'fixture-input.mkv'
+$wav = Join-Path $case 'sample-audio.wav'
+$ogg = Join-Path $case 'sample-vorbis.ogg'
+$m4a = Join-Path $case 'sample-aac.m4a'
+Write-MediaFixture @('-f', 'lavfi', '-i', 'testsrc2=size=64x48:rate=12:duration=1', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', $mp4)
+Write-MediaFixture @('-i', $mp4, '-an', '-c:v', 'copy', $mov)
+Write-MediaFixture @('-i', $mp4, '-c', 'copy', $mkv)
+Write-MediaFixture @('-i', $mp4, '-vn', '-c:a', 'pcm_s16le', $wav)
+Write-MediaFixture @('-i', $wav, '-c:a', 'libvorbis', $ogg)
+Write-MediaFixture @('-i', $wav, '-c:a', 'aac', $m4a)
+
+$webm = Convert-File $mp4 webm
+Assert-Codecs $webm 'vp9' 'opus'
+Assert-Codecs (Convert-File $webm mp4) 'h264' 'aac'
+Assert-Codecs (Convert-File $mkv webm) 'vp9' 'opus'
+Assert-Codecs (Convert-File $mov mp4) 'h264' ''
+$extracted = Convert-File $mp4 mp3
+Assert-Codecs $extracted '' 'mp3'
+Convert-File $mov mp3 -ExpectFailure | Out-Null
+Assert (-not (Test-Path -LiteralPath ([IO.Path]::ChangeExtension($mov, '.mp3')))) 'A silent video published an invalid MP3.'
+$rewritten = Convert-File $extracted wav
+Assert-Codecs $rewritten '' 'pcm_s16le'
+$flac = Convert-File $wav flac
+Assert-Codecs $flac '' 'flac'
+Assert-Codecs (Convert-File $flac mp3) '' 'mp3'
+Assert-Codecs (Convert-File $ogg wav) '' 'pcm_s16le'
+Assert-Codecs (Convert-File $m4a flac) '' 'flac'
+$missing = Convert-File $mp4 webm -ExpectFailure -NoFfmpeg
+Assert ($missing -match 'FFmpeg') 'Missing FFmpeg did not report the media dependency.'
+$corrupt = Join-Path $case 'broken.mp4'
+[IO.File]::WriteAllText($corrupt, 'not a video')
+Convert-File $corrupt webm -ExpectFailure | Out-Null
+Assert (-not (Test-Path -LiteralPath (Join-Path $case 'broken.webm'))) 'A broken video published an output.'
+Assert (@(Get-ChildItem -LiteralPath $case -Force -Filter '.convert-anythings-*').Count -eq 0) 'Media conversion left staging files behind.'
+Write-Output "Media codecs verified with ffprobe. Fixtures: $case"
