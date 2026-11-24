@@ -20,32 +20,303 @@ pub fn convert(
 ) -> Result<()> {
     if source == Format::Webp {
         validate_webp(input)?;
-        let intermediate = stage.join("decoded.png");
+    }
+
+    // Fast single-pass FFmpeg routes for modern image outputs (no intermediate PNG).
+    if matches!(output, Format::Webp | Format::Avif | Format::Ico) {
+        return encode_via_ffmpeg(engines, source, input, output, destination, stage);
+    }
+
+    // Formats requiring FFmpeg decoding (WebP, AVIF, HEIC)
+    if matches!(source, Format::Webp | Format::Avif | Format::Heic) {
+        if matches!(output, Format::Png | Format::Tiff) {
+            let codec = if output == Format::Png { "png" } else { "tiff" };
+            return execute(
+                engines
+                    .ffmpeg()?
+                    .arg("-i")
+                    .arg(input)
+                    .args(["-frames:v", "1", "-c:v", codec])
+                    .arg(destination),
+                "FFmpeg",
+            );
+        }
+        // Uncompressed TIFF intermediate avoids slow zlib compression before WIC white-flattening.
+        let intermediate = stage.join("decoded.tiff");
         execute(
             engines
                 .ffmpeg()?
                 .arg("-i")
                 .arg(input)
-                .args(["-frames:v", "1", "-c:v", "png"])
+                .args(["-frames:v", "1", "-c:v", "tiff", "-compression_algo", "raw"])
                 .arg(&intermediate),
             "FFmpeg",
         )?;
         return encode(&intermediate, output, destination);
     }
-    if output == Format::Webp {
-        let intermediate = stage.join("source.png");
-        encode(input, Format::Png, &intermediate)?;
-        return execute(
-            engines
-                .ffmpeg()?
-                .arg("-i")
-                .arg(intermediate)
-                .args(["-frames:v", "1", "-c:v", "libwebp", "-lossless", "1"])
-                .arg(destination),
-            "FFmpeg",
-        );
+
+    // Standard WIC encode, with FFmpeg fallback if WIC cannot decode (e.g. exotic/1-frame GIF/ICO).
+    match encode(input, output, destination) {
+        Ok(()) => Ok(()),
+        Err(wic_err) if engines.ffmpeg.is_some() => {
+            let intermediate = stage.join("decoded.tiff");
+            if execute(
+                engines
+                    .ffmpeg()?
+                    .arg("-i")
+                    .arg(input)
+                    .args(["-frames:v", "1", "-c:v", "tiff", "-compression_algo", "raw"])
+                    .arg(&intermediate),
+                "FFmpeg",
+            )
+            .is_ok()
+            {
+                encode(&intermediate, output, destination)
+            } else {
+                Err(wic_err)
+            }
+        }
+        Err(err) => Err(err),
     }
-    encode(input, output, destination)
+}
+
+pub fn compressed_extension(source: Format) -> &'static str {
+    match source {
+        Format::Png => "png",
+        Format::Webp => "webp",
+        Format::Avif => "avif",
+        Format::Gif => "gif",
+        _ => "jpg",
+    }
+}
+
+pub fn compress(
+    engines: &Engines,
+    source: Format,
+    input: &Path,
+    destination: &Path,
+    stage: &Path,
+) -> Result<()> {
+    if source == Format::Webp {
+        validate_webp(input)?;
+    }
+    match source {
+        Format::Jpg => {
+            if engines.ffmpeg_path().is_some() {
+                let mut cmd = engines.ffmpeg()?;
+                cmd.arg("-i")
+                    .arg(input)
+                    .args(["-frames:v", "1", "-map_metadata", "-1", "-q:v", "6"])
+                    .arg(destination);
+                if execute(&mut cmd, "FFmpeg").is_ok() {
+                    return Ok(());
+                }
+                let _ = std::fs::remove_file(destination);
+            }
+            encode(input, Format::Jpg, destination)
+        }
+        Format::Png => {
+            if engines.ffmpeg_path().is_some() {
+                let mut cmd = engines.ffmpeg()?;
+                cmd.arg("-i")
+                    .arg(input)
+                    .args([
+                        "-frames:v",
+                        "1",
+                        "-vf",
+                        "split[s0][s1];[s0]palettegen=max_colors=256:reserve_transparent=1[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3",
+                        "-compression_level",
+                        "9",
+                        "-map_metadata",
+                        "-1",
+                    ])
+                    .arg(destination);
+                if execute(&mut cmd, "FFmpeg").is_ok() {
+                    return Ok(());
+                }
+                let _ = std::fs::remove_file(destination);
+            }
+            encode(input, Format::Png, destination)
+        }
+        Format::Webp => {
+            let mut cmd = engines.ffmpeg()?;
+            cmd.arg("-i")
+                .arg(input)
+                .args([
+                    "-frames:v",
+                    "1",
+                    "-c:v",
+                    "libwebp",
+                    "-quality",
+                    "72",
+                    "-compression_level",
+                    "6",
+                    "-map_metadata",
+                    "-1",
+                ])
+                .arg(destination);
+            execute(&mut cmd, "FFmpeg")
+        }
+        Format::Avif => {
+            let mut cmd = engines.ffmpeg()?;
+            cmd.arg("-i")
+                .arg(input)
+                .args([
+                    "-frames:v",
+                    "1",
+                    "-c:v",
+                    "libsvtav1",
+                    "-crf",
+                    "35",
+                    "-preset",
+                    "8",
+                    "-svtav1-params",
+                    "avif=1",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-map_metadata",
+                    "-1",
+                ])
+                .arg(destination);
+            if execute(&mut cmd, "FFmpeg").is_ok() {
+                return Ok(());
+            }
+            let _ = std::fs::remove_file(destination);
+            let mut fallback = engines.ffmpeg()?;
+            fallback
+                .arg("-i")
+                .arg(input)
+                .args([
+                    "-frames:v",
+                    "1",
+                    "-c:v",
+                    "libaom-av1",
+                    "-still-picture",
+                    "1",
+                    "-crf",
+                    "36",
+                    "-cpu-used",
+                    "6",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-map_metadata",
+                    "-1",
+                ])
+                .arg(destination);
+            execute(&mut fallback, "FFmpeg")
+        }
+        Format::Gif => {
+            let mut cmd = engines.ffmpeg()?;
+            cmd.arg("-i")
+                .arg(input)
+                .args([
+                    "-vf",
+                    "fps=12,scale='min(480,iw)':-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3",
+                    "-loop",
+                    "0",
+                ])
+                .arg(destination);
+            execute(&mut cmd, "FFmpeg")
+        }
+        Format::Bmp | Format::Tiff | Format::Heic => {
+            if engines.ffmpeg_path().is_some() {
+                let mut cmd = engines.ffmpeg()?;
+                cmd.arg("-i")
+                    .arg(input)
+                    .args(["-frames:v", "1", "-map_metadata", "-1", "-q:v", "6"])
+                    .arg(destination);
+                if execute(&mut cmd, "FFmpeg").is_ok() {
+                    return Ok(());
+                }
+                let _ = std::fs::remove_file(destination);
+            }
+            convert(engines, source, input, Format::Jpg, destination, stage)
+        }
+        _ => Err("Định dạng ảnh này chưa hỗ trợ nén.".to_owned()),
+    }
+}
+
+fn encode_via_ffmpeg(
+    engines: &Engines,
+    source: Format,
+    input: &Path,
+    output: Format,
+    destination: &Path,
+    stage: &Path,
+) -> Result<()> {
+    let direct_input;
+    let src_path = if source == Format::Tiff {
+        // FFmpeg supports TIFF directly, so pass straight through; keep helper for exotic WIC-only sources.
+        input
+    } else {
+        input
+    };
+    let run_encode = |src: &Path, dst: &Path| -> Result<()> {
+        let mut cmd = engines.ffmpeg()?;
+        cmd.arg("-i").arg(src).args(["-frames:v", "1"]);
+        match output {
+            Format::Webp => {
+                cmd.args(["-c:v", "libwebp", "-quality", "88", "-compression_level", "4"]);
+            }
+            Format::Avif => {
+                cmd.args([
+                    "-c:v",
+                    "libsvtav1",
+                    "-crf",
+                    "28",
+                    "-preset",
+                    "8",
+                    "-svtav1-params",
+                    "avif=1",
+                    "-pix_fmt",
+                    "yuv420p",
+                ]);
+            }
+            Format::Ico => {
+                cmd.args([
+                    "-vf",
+                    "scale='min(256,iw)':'min(256,ih)':force_original_aspect_ratio=decrease",
+                    "-c:v",
+                    "png",
+                ]);
+            }
+            _ => return Err("Định dạng ảnh đích không hợp lệ.".to_owned()),
+        }
+        execute(cmd.arg(dst), "FFmpeg")
+    };
+
+    match run_encode(src_path, destination) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            // Fallback: if SVT-AV1 isn't available for AVIF, try libaom-av1; or if FFmpeg couldn't read input, decode via WIC to uncompressed TIFF.
+            if output == Format::Avif {
+                let mut cmd = engines.ffmpeg()?;
+                cmd.arg("-i").arg(src_path).args([
+                    "-frames:v",
+                    "1",
+                    "-c:v",
+                    "libaom-av1",
+                    "-still-picture",
+                    "1",
+                    "-crf",
+                    "30",
+                    "-cpu-used",
+                    "6",
+                    "-pix_fmt",
+                    "yuv420p",
+                ]);
+                if execute(cmd.arg(destination), "FFmpeg").is_ok() {
+                    return Ok(());
+                }
+            }
+            direct_input = stage.join("wic_norm.tiff");
+            if encode(input, Format::Tiff, &direct_input).is_ok() {
+                run_encode(&direct_input, destination)
+            } else {
+                Err(err)
+            }
+        }
+    }
 }
 
 fn validate_webp(path: &Path) -> Result<()> {
@@ -62,8 +333,37 @@ fn validate_webp(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn encode(input: &Path, output: Format, destination: &Path) -> Result<()> {
+pub fn encode(input: &Path, output: Format, destination: &Path) -> Result<()> {
     encode_with_size(input, output, destination, None)
+}
+
+pub fn probe_dimensions_and_dpi(input: &Path) -> Option<(u32, u32, f64, f64)> {
+    let _apartment = Apartment::new().ok()?;
+    unsafe {
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let name = wide(input);
+        let decoder = factory
+            .CreateDecoderFromFilename(
+                PCWSTR(name.as_ptr()),
+                None,
+                GENERIC_READ,
+                WICDecodeMetadataCacheOnDemand,
+            )
+            .ok()?;
+        let frame = decoder.GetFrame(0).ok()?;
+        let (mut w, mut h) = (0, 0);
+        frame.GetSize(&mut w, &mut h).ok()?;
+        let (mut dx, mut dy) = (96.0, 96.0);
+        let _ = frame.GetResolution(&mut dx, &mut dy);
+        if dx <= 0.0 {
+            dx = 96.0;
+        }
+        if dy <= 0.0 {
+            dy = 96.0;
+        }
+        Some((w, h, dx, dy))
+    }
 }
 
 pub fn encode_with_size(
@@ -157,7 +457,13 @@ pub fn encode_with_size(
         }
         frame.SetPixelFormat(&mut pixel_format).map_err(wic_error)?;
 
-        let (ready, _pixels) = if flatten {
+        let src_format = source.GetPixelFormat().unwrap_or_default();
+        let already_opaque = src_format == GUID_WICPixelFormat24bppBGR
+            || src_format == GUID_WICPixelFormat24bppRGB
+            || src_format == GUID_WICPixelFormat32bppBGR
+            || src_format == GUID_WICPixelFormat8bppGray;
+
+        let (ready, _pixels) = if flatten && !already_opaque {
             flatten_white(&factory, &source, width, height)?
         } else {
             (source, Vec::new())
@@ -211,6 +517,9 @@ fn flatten_white(
             .map_err(|error| error.to_string())?;
         for pixel in pixels.as_chunks_mut::<4>().0 {
             let alpha = u16::from(pixel[3]);
+            if alpha == 255 {
+                continue;
+            }
             for color in &mut pixel[..3] {
                 *color = ((u16::from(*color) * alpha + 255 * (255 - alpha) + 127) / 255) as u8;
             }

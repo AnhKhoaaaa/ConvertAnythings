@@ -10,12 +10,12 @@ use windows::core::{PCWSTR, w};
 
 use super::{Format, Result};
 
-pub fn available() -> bool {
+fn com_available(key: PCWSTR) -> bool {
     let mut bytes = 0;
     unsafe {
         RegGetValueW(
             HKEY_CLASSES_ROOT,
-            w!("Word.Application\\CLSID"),
+            key,
             PCWSTR::null(),
             RRF_RT_REG_SZ,
             None,
@@ -24,6 +24,18 @@ pub fn available() -> bool {
         )
         .is_ok()
     }
+}
+
+pub fn word_available() -> bool {
+    com_available(w!("Word.Application\\CLSID"))
+}
+
+pub fn excel_available() -> bool {
+    com_available(w!("Excel.Application\\CLSID"))
+}
+
+pub fn powerpoint_available() -> bool {
+    com_available(w!("PowerPoint.Application\\CLSID"))
 }
 
 pub fn convert(input: &Path, source: Format, output: &Path, stage: &Path) -> Result<()> {
@@ -35,9 +47,16 @@ pub fn convert(input: &Path, source: Format, output: &Path, stage: &Path) -> Res
     } else {
         input
     };
+    let app_kind = if source.is_excel_doc() {
+        "excel"
+    } else if source.is_ppt_doc() {
+        "powerpoint"
+    } else {
+        "word"
+    };
     let system = std::env::var_os("SystemRoot").ok_or("Không tìm được thư mục Windows.")?;
     let executable = Path::new(&system).join("System32\\WindowsPowerShell\\v1.0\\powershell.exe");
-    let log_path = stage.join("word.log");
+    let log_path = stage.join("office.log");
     let log = File::create(&log_path).map_err(|error| error.to_string())?;
     let mut child = Command::new(executable)
         .creation_flags(CREATE_NO_WINDOW.0)
@@ -50,24 +69,27 @@ pub fn convert(input: &Path, source: Format, output: &Path, stage: &Path) -> Res
         .env("CONVERT_WORD_SCRIPT", include_str!("word-export.ps1"))
         .env("CONVERT_WORD_INPUT", input)
         .env("CONVERT_WORD_OUTPUT", output)
+        .env("CONVERT_OFFICE_APP", app_kind)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(log)
         .spawn()
-        .map_err(|error| format!("Không mở được bộ chuyển đổi Word. {error}"))?;
-    let deadline = Instant::now() + Duration::from_secs(75);
+        .map_err(|error| format!("Không mở được bộ chuyển đổi Office. {error}"))?;
+    let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         match child.try_wait().map_err(|error| error.to_string())? {
             Some(status) if status.success() && output.is_file() => return Ok(()),
             Some(_) => {
                 let message = fs::read_to_string(&log_path).unwrap_or_default();
                 let detail: String = message.trim().chars().take(350).collect();
-                return Err(format!("Word không thể xuất PDF. {detail}"));
+                return Err(format!("Office không thể chuyển tệp. {detail}"));
             }
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("Word không hoàn tất trong 75 giây. Hãy kiểm tra hộp thoại hoặc trạng thái kích hoạt của Word.".to_owned());
+                return Err(
+                    "Office không hoàn tất trong 90 giây. Hãy kiểm tra hộp thoại hoặc trạng thái kích hoạt.".to_owned(),
+                );
             }
             None => std::thread::sleep(Duration::from_millis(80)),
         }

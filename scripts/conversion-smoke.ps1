@@ -16,30 +16,45 @@ function Assert([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
-function Convert-File([string]$InputFile, [string]$Format, [switch]$ExpectFailure, [switch]$NoFfmpeg) {
+function Convert-File([string]$InputFile, [string]$Format, [switch]$ExpectFailure, [switch]$NoFfmpeg, [string]$FallbackDir = '') {
+    return Convert-Files @($InputFile) $Format -ExpectFailure:$ExpectFailure -NoFfmpeg:$NoFfmpeg -FallbackDir $FallbackDir
+}
+
+function Convert-Files([string[]]$InputFiles, [string]$Format, [switch]$ExpectFailure, [switch]$NoFfmpeg, [string]$FallbackDir = '') {
     $info = New-Object System.Diagnostics.ProcessStartInfo
     $info.FileName = $Executable
-    $info.Arguments = '--convert --to ' + $Format + ' "' + $InputFile + '"'
+    $quoted = ($InputFiles | ForEach-Object { '"' + $_ + '"' }) -join ' '
+    $info.Arguments = '--convert --to ' + $Format + ' ' + $quoted
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
     $info.StandardOutputEncoding = [Text.Encoding]::UTF8
     $info.StandardErrorEncoding = [Text.Encoding]::UTF8
-    if ($NoFfmpeg) { $info.EnvironmentVariables['PATH'] = "$env:WINDIR\System32" }
+    if ($NoFfmpeg) {
+        $info.EnvironmentVariables['PATH'] = "$env:WINDIR\System32"
+        $info.EnvironmentVariables['CONVERTANYTHINGS_STRICT_PATH'] = '1'
+    }
+    if ($FallbackDir) {
+        $info.EnvironmentVariables['CONVERTANYTHINGS_FALLBACK_DIR'] = $FallbackDir
+    }
     $process = [Diagnostics.Process]::Start($info)
     try {
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit(125000)) { $process.Kill(); throw "Timed out converting $InputFile to $Format" }
+        if (-not $process.WaitForExit(125000)) { $process.Kill(); throw "Timed out converting $($InputFiles -join ', ') to $Format" }
         if ($ExpectFailure) {
-            Assert ($process.ExitCode -ne 0) "An unsupported conversion succeeded: $InputFile -> $Format"
+            Assert ($process.ExitCode -ne 0) "An unsupported conversion succeeded: $($InputFiles -join ', ') -> $Format"
             return $stderr.Result.Trim()
         }
-        Assert ($process.ExitCode -eq 0) "Conversion failed: $InputFile -> $Format. $($stderr.Result)"
-        $output = $stdout.Result.Trim()
-        Assert (Test-Path -LiteralPath $output) "Worker claimed success with no output: $output"
-        return $output
+        Assert ($process.ExitCode -eq 0) "Conversion failed: $($InputFiles -join ', ') -> $Format. $($stderr.Result)"
+        $outputs = @($stdout.Result -split "\r?\n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+        Assert ($outputs.Count -ge 1) "Worker claimed success with no output."
+        foreach ($output in $outputs) {
+            Assert (Test-Path -LiteralPath $output) "Worker claimed success with no output: $output"
+        }
+        if ($outputs.Count -eq 1) { return $outputs[0] }
+        return $outputs
     } finally { $process.Dispose() }
 }
 
@@ -124,8 +139,27 @@ if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
     Assert ($header -eq 'WEBP') 'The WebP container signature is missing.'
     $fromWebp = Convert-File $webp png
     Assert ((Get-ImageInfo $fromWebp).Pixel.A -eq 0) 'The WebP to PNG route lost transparency.'
+    $avif = Convert-File $png avif
+    $ftyp = [Text.Encoding]::ASCII.GetString(([IO.File]::ReadAllBytes($avif))[4..7])
+    Assert ($ftyp -eq 'ftyp') 'The AVIF container signature is missing.'
+    $ico = Convert-File $png ico
+    $icoBytes = [IO.File]::ReadAllBytes($ico)
+    Assert ($icoBytes[0] -eq 0 -and $icoBytes[1] -eq 0 -and $icoBytes[2] -eq 1 -and $icoBytes[3] -eq 0) 'The ICO header signature is invalid.'
     $errorText = Convert-File $webp png -ExpectFailure -NoFfmpeg
     Assert ($errorText -match 'FFmpeg') 'Missing FFmpeg did not report the dependency.'
+}
+$singleImgPdf = Convert-File $png pdf
+$sigPdf = [Text.Encoding]::ASCII.GetString(([IO.File]::ReadAllBytes($singleImgPdf))[0..4])
+Assert ($sigPdf -eq '%PDF-') 'PNG to PDF signature mismatch.'
+$mergedImgPdf = Convert-Files @($png, $jpg) pdf
+$mergedPages = Convert-File $mergedImgPdf png
+Assert ((Get-ChildItem -LiteralPath $mergedPages -Filter '*.png').Count -eq 2) 'Merged image PDF did not contain 2 pages.'
+$compressedImgs = Convert-Files @($png, $jpg) compress
+Assert ($compressedImgs.Count -eq 2) 'Batch image compress did not return 2 outputs.'
+foreach ($cImg in $compressedImgs) {
+    Assert ([IO.Path]::GetFileNameWithoutExtension($cImg) -like '*-compressed*') "Compressed image missing -compressed suffix: $cImg"
+    $cInfo = Get-ImageInfo $cImg
+    Assert ($cInfo.Width -eq 52 -and $cInfo.Height -eq 36) "Compressed image dimensions changed: $cImg"
 }
 $bad = Join-Path $case 'bad.png'
 [IO.File]::WriteAllText($bad, 'broken image data')
@@ -152,6 +186,22 @@ Assert (@(Get-ChildItem -LiteralPath $pages -Filter '*.jpg').Count -eq 2) 'A PDF
 Assert ((Get-ImageInfo (Join-Path $pages 'multi-page-002.jpg')).Format -eq [Drawing.Imaging.ImageFormat]::Jpeg.Guid) 'PDF JPEG container mismatch.'
 $second = Convert-File $multi png
 Assert ($second -like '*(1)') 'A PDF output directory collision was not handled.'
+$mergedPdf = Convert-Files @($single, $multi) merge-pdf
+Assert ([IO.Path]::GetFileName($mergedPdf) -like '*-merged.pdf') "Merged PDF missing -merged suffix: $mergedPdf"
+$mergedPdfPages = Convert-File $mergedPdf png
+Assert ((Get-ChildItem -LiteralPath $mergedPdfPages -Filter '*.png').Count -eq 3) 'Merged PDF did not contain 3 pages.'
+$splitPdfDir = Convert-File $multi split-pdf
+Assert ((Split-Path -Leaf $splitPdfDir) -eq 'multi-page-split') "Unexpected split PDF dir: $splitPdfDir"
+$splitPdfs = @(Get-ChildItem -LiteralPath $splitPdfDir -Filter '*.pdf')
+Assert ($splitPdfs.Count -eq 2) 'Split PDF did not create 2 files.'
+foreach ($sp in $splitPdfs) {
+    $spSig = [Text.Encoding]::ASCII.GetString(([IO.File]::ReadAllBytes($sp.FullName))[0..4])
+    Assert ($spSig -eq '%PDF-') "Split PDF invalid header: $($sp.FullName)"
+}
+$compressedPdf = Convert-File $multi compress
+Assert ([IO.Path]::GetFileName($compressedPdf) -like '*-compressed.pdf') "Compressed PDF missing suffix: $compressedPdf"
+$cmpPdfSig = [Text.Encoding]::ASCII.GetString(([IO.File]::ReadAllBytes($compressedPdf))[0..4])
+Assert ($cmpPdfSig -eq '%PDF-') 'Compressed PDF signature mismatch.'
 $badPdf = Join-Path $case 'broken.pdf'
 [IO.File]::WriteAllText($badPdf, '%PDF-1.4 corrupt')
 Convert-File $badPdf png -ExpectFailure | Out-Null
@@ -183,6 +233,86 @@ try {
     $docxRaster = Convert-File $docxPdf png
     $info = Get-ImageInfo $docxRaster
     Assert ($info.Width -eq 1275 -and $info.Height -eq 1650) 'The exported Word page did not retain its Letter layout.'
+    if (Get-Command pdftotext -CommandType Application -ErrorAction SilentlyContinue) {
+        $pdfTxt = Convert-File $single txt
+        $extractedText = [IO.File]::ReadAllText($pdfTxt)
+        Assert ($extractedText.Contains('Page 1')) 'PDF to TXT did not contain expected text.'
+
+        $pdfDocx = Convert-File $single docx
+        Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+        $zip = [IO.Compression.ZipFile]::OpenRead($pdfDocx)
+        try {
+            $docEntry = $zip.GetEntry('word/document.xml')
+            Assert ($null -ne $docEntry) 'PDF to DOCX did not produce word/document.xml.'
+            $reader = New-Object IO.StreamReader ($docEntry.Open())
+            try {
+                Assert ($reader.ReadToEnd().Contains('Page 1')) 'PDF to DOCX did not contain extracted text.'
+            } finally { $reader.Dispose() }
+        } finally { $zip.Dispose() }
+    }
+
+    $mdPath = Join-Path $case 'readme.md'
+    [IO.File]::WriteAllText($mdPath, "# ConvertAnythings`n`nHello **Markdown** and ``code``!`n`n- Item 1`n", [Text.Encoding]::UTF8)
+    $htmlOut = Convert-File $mdPath html
+    $htmlText = [IO.File]::ReadAllText($htmlOut)
+    Assert ($htmlText.Contains('<h1>ConvertAnythings</h1>') -and $htmlText.Contains('<strong>Markdown</strong>')) 'Markdown to HTML output mismatch.'
+
+    $mdDocxOut = Convert-File $mdPath docx
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $mdZip = [IO.Compression.ZipFile]::OpenRead($mdDocxOut)
+    try {
+        $mdDocEntry = $mdZip.GetEntry('word/document.xml')
+        Assert ($null -ne $mdDocEntry) 'Markdown to DOCX did not produce word/document.xml.'
+        $mdReader = New-Object IO.StreamReader ($mdDocEntry.Open())
+        try {
+            $mdXml = $mdReader.ReadToEnd()
+            Assert ($mdXml.Contains('ConvertAnythings') -and $mdXml.Contains('Markdown') -and $mdXml.Contains('<w:b/>')) 'Markdown to DOCX content mismatch.'
+        } finally { $mdReader.Dispose() }
+    } finally { $mdZip.Dispose() }
+
+    $mdPdfOut = Convert-File $mdPath pdf
+    $mdPdfSig = [Text.Encoding]::ASCII.GetString(([IO.File]::ReadAllBytes($mdPdfOut))[0..4])
+    Assert ($mdPdfSig -eq '%PDF-') 'Markdown to PDF signature mismatch.'
+    if (Get-Command pdftotext -CommandType Application -ErrorAction SilentlyContinue) {
+        $mdPdfTxt = [IO.Path]::ChangeExtension($mdPdfOut, 'verified.txt')
+        & pdftotext -q -enc UTF-8 $mdPdfOut $mdPdfTxt
+        Assert ($LASTEXITCODE -eq 0) 'Could not extract text from Markdown PDF.'
+        $mdPdfText = [IO.File]::ReadAllText($mdPdfTxt)
+        Assert ($mdPdfText.Contains('ConvertAnythings') -and $mdPdfText.Contains('Markdown')) 'Markdown PDF did not preserve text.'
+    }
+
+    $roDir = Join-Path $case 'readonly-src'
+    $fbDir = Join-Path $case 'fallback-downloads'
+    New-Item -Path $roDir -ItemType Directory -Force | Out-Null
+    New-Item -Path $fbDir -ItemType Directory -Force | Out-Null
+    $roMd = Join-Path $roDir 'locked.md'
+    [IO.File]::WriteAllText($roMd, "# Locked`n`nFallback test", [Text.Encoding]::UTF8)
+    $acl = Get-Acl -LiteralPath $roDir
+    $denyRule = New-Object Security.AccessControl.FileSystemAccessRule(
+        "$env:USERDOMAIN\$env:USERNAME",
+        'CreateFiles,CreateDirectories',
+        'None',
+        'None',
+        'Deny'
+    )
+    $acl.AddAccessRule($denyRule)
+    Set-Acl -LiteralPath $roDir -AclObject $acl
+    try {
+        $fbOut = Convert-File $roMd html -FallbackDir $fbDir
+        Assert ((Split-Path -Parent $fbOut) -eq $fbDir) "Read-only fallback did not write to fallback dir: $fbOut"
+    } finally {
+        $acl.RemoveAccessRule($denyRule) | Out-Null
+        Set-Acl -LiteralPath $roDir -AclObject $acl
+    }
+
+    $tsCode = Join-Path $case 'script.ts'
+    [IO.File]::WriteAllText($tsCode, 'export const v: number = 1;', [Text.Encoding]::UTF8)
+    Convert-File $tsCode mp4 -ExpectFailure | Out-Null
+
+    $fakeVideo = Join-Path $case 'misnamed.mp4'
+    [IO.File]::WriteAllBytes($fakeVideo, [IO.File]::ReadAllBytes($raster))
+    $sniffErr = Convert-File $fakeVideo webm -ExpectFailure
+    Assert ($sniffErr -match 'PNG' -and $sniffErr -match 'MP4') "Magic-byte sniff did not report misnamed PNG: $sniffErr"
     $textTool = Get-Command pdftotext -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($textTool) {
         foreach ($path in @($txtPdf, $utf16Pdf, $docxPdf)) {
@@ -246,8 +376,12 @@ Write-MediaFixture @('-i', $wav, '-c:a', 'aac', $m4a)
 $webm = Convert-File $mp4 webm
 Assert-Codecs $webm 'vp9' 'opus'
 Assert-Codecs (Convert-File $webm mp4) 'h264' 'aac'
+Assert-Codecs (Convert-File $mkv mp4) 'h264' 'aac'
 Assert-Codecs (Convert-File $mkv webm) 'vp9' 'opus'
 Assert-Codecs (Convert-File $mov mp4) 'h264' ''
+$gifOut = Convert-File $mp4 gif
+$gifHdr = [Text.Encoding]::ASCII.GetString(([IO.File]::ReadAllBytes($gifOut))[0..2])
+Assert ($gifHdr -eq 'GIF') 'MP4 to GIF header mismatch.'
 $extracted = Convert-File $mp4 mp3
 Assert-Codecs $extracted '' 'mp3'
 Convert-File $mov mp3 -ExpectFailure | Out-Null
@@ -257,8 +391,19 @@ Assert-Codecs $rewritten '' 'pcm_s16le'
 $flac = Convert-File $wav flac
 Assert-Codecs $flac '' 'flac'
 Assert-Codecs (Convert-File $flac mp3) '' 'mp3'
+Assert-Codecs (Convert-File $wav m4a) '' 'aac'
+Assert-Codecs (Convert-File $wav ogg) '' 'opus'
 Assert-Codecs (Convert-File $ogg wav) '' 'pcm_s16le'
 Assert-Codecs (Convert-File $m4a flac) '' 'flac'
+$compressedVideos = Convert-Files @($mp4, $mov) compress
+Assert ($compressedVideos.Count -eq 2) 'Batch video compress did not return 2 outputs.'
+foreach ($cv in $compressedVideos) {
+    Assert ([IO.Path]::GetFileNameWithoutExtension($cv) -like '*-compressed*') "Compressed video missing -compressed suffix: $cv"
+    $cvJson = & $ffprobe -v error -show_entries stream=codec_name,codec_type -of json $cv
+    Assert ($LASTEXITCODE -eq 0) "ffprobe failed on compressed video: $cv"
+    $cvVideo = (($cvJson | Out-String | ConvertFrom-Json).streams | Where-Object codec_type -eq 'video' | ForEach-Object { $_.codec_name }) -join ','
+    Assert ($cvVideo -eq 'h264') "Compressed video codec mismatch: $cvVideo"
+}
 $missing = Convert-File $mp4 webm -ExpectFailure -NoFfmpeg
 Assert ($missing -match 'FFmpeg') 'Missing FFmpeg did not report the media dependency.'
 $corrupt = Join-Path $case 'broken.mp4'
